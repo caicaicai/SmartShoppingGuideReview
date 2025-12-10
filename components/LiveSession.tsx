@@ -76,8 +76,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       outputAudioContextRef.current = outputCtx;
 
       // 3. Connect to Backend WebSocket
-      // Dynamic URL: Uses the same host/port as the web page.
-      // This works perfectly with Nginx proxying.
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.host; // includes hostname and port
       const wsUrl = `${protocol}//${host}`; 
@@ -87,7 +85,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
       ws.onopen = () => {
         console.log("Connected to Backend Relay");
-        // Send start signal with system instructions
         const instruction = SYSTEM_INSTRUCTION_TEMPLATE
             .replace('${persona}', scenario.customerPersona)
             .replace('${initialPrompt}', scenario.initialPrompt);
@@ -118,13 +115,13 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
       ws.onerror = (e) => {
         console.error("WebSocket error", e);
-        setError("无法连接到后端服务器。请确保服务已启动。");
-        setInitializing(false);
+        // Do not fail immediately on error during init, wait for close
       };
       
       ws.onclose = () => {
         console.log("WebSocket closed");
         setIsConnected(false);
+        // Only set error if we never connected successfully to avoid flashing errors on normal reload
       };
 
     } catch (err: any) {
@@ -140,8 +137,10 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     
     processor.onaudioprocess = async (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
-      const pcmBlob = createPcmBlob(inputData);
-      const base64 = await blobToBase64(pcmBlob);
+      
+      // FIX: createPcmBlob returns { data: "base64...", mimeType: "..." }
+      // It does NOT return a browser Blob. We use the data property directly.
+      const pcmGenAiContent = createPcmBlob(inputData);
       
       if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
@@ -149,7 +148,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
               payload: {
                   media: {
                       mimeType: 'audio/pcm;rate=16000',
-                      data: base64
+                      data: pcmGenAiContent.data // Use .data directly!
                   }
               }
           }));

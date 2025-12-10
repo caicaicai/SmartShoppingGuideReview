@@ -1,4 +1,4 @@
-import { Blob } from '@google/genai';
+import { Blob as GenAIBlob } from '@google/genai';
 
 export function base64ToUint8Array(base64: string): Uint8Array {
   const binaryString = atob(base64);
@@ -20,7 +20,8 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-export function createPcmBlob(data: Float32Array): Blob {
+// Returns a GenAI SDK compatible object, NOT a browser Blob
+export function createPcmBlob(data: Float32Array): GenAIBlob {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
@@ -53,6 +54,7 @@ export async function decodeAudioData(
   return buffer;
 }
 
+// Only accepts standard browser Blob
 export async function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -62,6 +64,6 @@ export async function blobToBase64(blob: Blob): Promise<string> {
       resolve(base64);
     };
     reader.onerror = reject;
-    reader.readAsDataURL(blob as any); // Type assertion for standard Blob vs GenAI Blob
+    reader.readAsDataURL(blob); 
   });
 }
