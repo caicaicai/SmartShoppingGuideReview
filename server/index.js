@@ -140,7 +140,9 @@ const wss = new WebSocketServer({ noServer: true });
 
 // WebSocket Logic
 wss.on('connection', (ws) => {
-    console.log("🔌 New Client Connected via WebSocket (/ws)");
+    const clientId = Math.random().toString(36).substring(7).toUpperCase();
+    console.log(`[${clientId}] 🔌 Client Connected via WebSocket (/ws)`);
+    
     let session = null;
 
     ws.on('message', async (rawMsg) => {
@@ -150,7 +152,7 @@ wss.on('connection', (ws) => {
             const msg = JSON.parse(msgStr);
 
             if (msg.type === 'start_session') {
-                console.log("🚀 Starting Gemini Live Session...");
+                console.log(`[${clientId}] 🚀 Requesting Gemini Live Session...`);
                 const { instruction } = msg;
                 try {
                     session = await ai.live.connect({
@@ -163,45 +165,75 @@ wss.on('connection', (ws) => {
                         },
                         callbacks: {
                             onopen: () => {
-                                console.log("✅ Gemini Session Connected");
+                                console.log(`[${clientId}] ✅ Gemini Session Established`);
                                 ws.send(JSON.stringify({ type: 'status', status: 'open' }));
                             },
                             onmessage: (serverContent) => {
+                                // --- LOGGING LOGIC START ---
+                                const content = serverContent.serverContent;
+                                if (content) {
+                                    // 1. Log User Speech (Transcription)
+                                    if (content.inputTranscription?.text) {
+                                        console.log(`[${clientId}] 🎤 User: "${content.inputTranscription.text}"`);
+                                    }
+                                    
+                                    // 2. Log AI Speech (Transcription)
+                                    if (content.outputTranscription?.text) {
+                                        console.log(`[${clientId}] 🤖 AI: "${content.outputTranscription.text}"`);
+                                    }
+
+                                    // 3. Log Audio Output (Briefly)
+                                    if (content.modelTurn?.parts?.[0]?.inlineData) {
+                                        process.stdout.write(`[${clientId}] 🔊 <AudioChunk> \r`); 
+                                    }
+
+                                    // 4. Log Interruptions
+                                    if (content.interrupted) {
+                                        console.log(`\n[${clientId}] ⚠️ Interrupted`);
+                                    }
+                                }
+                                // --- LOGGING LOGIC END ---
+
                                 // IMPORTANT: pass the WHOLE server message structure
                                 ws.send(JSON.stringify({ type: 'gemini', data: serverContent }));
                             },
                             onclose: () => {
-                                console.log("🔒 Gemini Session Closed");
+                                console.log(`[${clientId}] 🔒 Gemini Session Closed by Remote`);
                                 ws.send(JSON.stringify({ type: 'status', status: 'closed' }));
                             },
                             onerror: (e) => {
-                                console.error("❌ Gemini Session Error:", e);
+                                console.error(`[${clientId}] ❌ Gemini Session Error:`, e);
                                 ws.send(JSON.stringify({ type: 'error', message: "Gemini API Error: " + e.message }));
                             }
                         }
                     });
                 } catch (e) {
-                    console.error("❌ Gemini Connection Failed:", e);
+                    console.error(`[${clientId}] ❌ Gemini Connection Failed:`, e);
                     ws.send(JSON.stringify({ type: 'error', message: e.message }));
                 }
             } else if (msg.type === 'input') {
                 if (session) {
+                    const mimeType = msg.payload?.media?.mimeType;
+                    // Verbose logging for non-audio inputs (images) to reduce noise
+                    if (mimeType && mimeType.includes('image')) {
+                         console.log(`[${clientId}] 📤 Sending Video Frame (${Math.round(msg.payload.media.data.length/1024)}KB)`);
+                    }
                     session.sendRealtimeInput(msg.payload);
                 } else {
                     // Silent fail for keep-alives or pre-connection data
                 }
             }
         } catch (err) {
-            console.error("❌ Error processing WebSocket message:", err);
+            console.error(`[${clientId}] ❌ Error processing WebSocket message:`, err);
         }
     });
 
     ws.on('error', (err) => {
-        console.error("❌ WebSocket Client Error:", err);
+        console.error(`[${clientId}] ❌ WebSocket Client Error:`, err);
     });
 
     ws.on('close', () => {
-        console.log("🔌 Client Disconnected");
+        console.log(`[${clientId}] 🔌 Client Disconnected`);
         if (session) {
             session = null;
         }
