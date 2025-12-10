@@ -1,0 +1,8 @@
+{
+  "name": "智能导购评测",
+  "description": "一个由 AI 驱动的角色扮演模拟系统，用于培训和评估家电销售助理。",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
