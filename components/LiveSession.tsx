@@ -46,8 +46,15 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   }, [scenario.id]);
 
   const initializeSession = useCallback(async () => {
+    // 1. API Key Check
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      setError("配置错误：未找到 API Key。请在项目根目录创建 .env 文件并设置 API_KEY=你的密钥");
+      return;
+    }
+
     try {
-      // 1. Setup Media Stream (Camera + Mic)
+      // 2. Setup Media Stream (Camera + Mic)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -66,13 +73,13 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         videoRef.current.play();
       }
 
-      // 2. Setup Audio Contexts
+      // 3. Setup Audio Contexts
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       const config = {
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         systemInstruction: SYSTEM_INSTRUCTION_TEMPLATE
@@ -80,7 +87,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
           .replace('${initialPrompt}', scenario.initialPrompt),
       };
 
-      // 3. Connect to Live API
+      // 4. Connect to Live API
       const sessionPromise = ai.live.connect({
         model: config.model,
         config: {
@@ -120,7 +127,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
           },
           onerror: (err) => {
             console.error("Session error:", err);
-            setError("连接错误，请重试。");
+            setError("连接错误：AI 服务连接断开。");
           }
         }
       });
@@ -129,7 +136,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
     } catch (err) {
       console.error("Initialization failed:", err);
-      setError("无法访问摄像头/麦克风或连接 AI 服务失败。");
+      setError("无法访问摄像头/麦克风或连接 AI 服务失败。请确保已授予浏览器权限。");
     }
   }, [scenario, micActive]);
 
@@ -326,7 +333,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                     <p className="text-blue-400 font-bold tracking-widest text-xs mb-1 uppercase">AI 顾客</p>
                     <h3 className="text-2xl font-light text-white mb-2">{scenario.customerPersona.split('，')[0]}</h3>
                     
-                    {!isConnected && (
+                    {!isConnected && !error && (
                         <div className="flex items-center justify-center gap-2 text-yellow-500 animate-pulse">
                             <div className="w-2 h-2 bg-yellow-500 rounded-full"></div>
                             <span className="text-sm">正在建立连接...</span>
@@ -382,8 +389,11 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
             {/* Error Toast */}
             {error && (
-                <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-red-600 text-white px-6 py-3 rounded-lg shadow-lg">
-                    {error}
+                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-red-600/90 text-white px-8 py-6 rounded-xl shadow-2xl backdrop-blur max-w-lg text-center border border-red-400">
+                    <svg className="w-12 h-12 mx-auto mb-3 text-red-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                    <h3 className="text-xl font-bold mb-2">配置错误</h3>
+                    <p className="text-red-100 mb-4">{error}</p>
+                    <button onClick={() => window.location.reload()} className="bg-white text-red-600 px-4 py-2 rounded-lg font-bold text-sm hover:bg-gray-100">刷新重试</button>
                 </div>
             )}
         </div>

@@ -2,7 +2,25 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { ChatMessage, EvaluationReport, Scenario } from '../types';
 
 export async function generateEvaluation(history: ChatMessage[], images: string[], scenario: Scenario): Promise<EvaluationReport> {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+      console.error("API Key missing during evaluation");
+      return {
+          score: 0,
+          visualAnalysis: {
+              visualScore: 0,
+              smileDetected: false,
+              postureAnalysis: "无法分析",
+              eyeContactAnalysis: "无法分析"
+          },
+          summary: "错误：未找到 API Key。请检查 .env 配置文件。",
+          strengths: [],
+          weaknesses: [],
+          tips: ["请在本地根目录配置 .env 文件。"]
+      };
+  }
+    
+  const ai = new GoogleGenAI({ apiKey });
   
   const transcript = history.map(msg => `${msg.role.toUpperCase()}: ${msg.text}`).join('\n');
 
