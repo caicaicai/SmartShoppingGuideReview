@@ -79,7 +79,7 @@ app.post('/api/evaluate', async (req, res) => {
     - weaknesses: 劣势列表。
     - tips: 具体的改进建议。
 
-    所有输出必须使用中文。
+    所有输出必须使用简体中文。
     `;
 
     const parts = [{ text: promptText }];

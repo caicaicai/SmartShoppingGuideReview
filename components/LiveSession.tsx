@@ -197,44 +197,46 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   };
 
   const startVideoStreaming = (ws: WebSocket) => {
+    console.log("📹 Starting Video Streaming");
+    
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
 
     frameIntervalRef.current = window.setInterval(() => {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      if (!video || !canvas) return;
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      canvas.width = video.videoWidth * 0.5; // Scale down for bandwidth
-      canvas.height = video.videoHeight * 0.5;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      const base64 = canvas.toDataURL('image/jpeg', JPEG_QUALITY).split(',')[1];
-      
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-            type: 'input',
-            payload: {
-                media: {
-                    mimeType: 'image/jpeg',
-                    data: base64
-                }
+        if (!videoRef.current || !canvasRef.current) return;
+        
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        
+        if (!ctx) return;
+        
+        if (video.readyState >= 2) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+            const base64Data = dataUrl.split(',')[1];
+            
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'input',
+                    payload: {
+                        media: {
+                            mimeType: 'image/jpeg',
+                            data: base64Data
+                        }
+                    }
+                }));
             }
-        }));
-      }
 
-      // Capture for Evaluation
-      const now = Date.now();
-      if (now - lastEvalImageTimeRef.current > EVAL_IMAGE_INTERVAL) {
-        lastEvalImageTimeRef.current = now;
-        evalImagesRef.current.push(base64);
-        if (evalImagesRef.current.length > MAX_EVAL_IMAGES) {
-            evalImagesRef.current.shift();
+            const now = Date.now();
+            if (now - lastEvalImageTimeRef.current >= EVAL_IMAGE_INTERVAL && evalImagesRef.current.length < MAX_EVAL_IMAGES) {
+                evalImagesRef.current.push(base64Data);
+                lastEvalImageTimeRef.current = now;
+            }
         }
-      }
-
     }, 1000 / FRAME_RATE);
   };
 
@@ -305,7 +307,16 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         sourcesRef.current.forEach(s => s.stop());
         sourcesRef.current.clear();
         
-        // Reset buffers but keep UI mostly intact
+        // FIX: Commit partial transcript so it doesn't disappear when interrupted
+        if (currentOutputTransRef.current.trim()) {
+            setTranscripts(prev => [...prev, { 
+                role: 'model', 
+                text: currentOutputTransRef.current + " (被打断)", 
+                timestamp: Date.now() 
+            }]);
+        }
+        
+        // Reset buffers
         nextStartTimeRef.current = ctx.currentTime;
         currentOutputTransRef.current = '';
         setStreamingModelText('');
