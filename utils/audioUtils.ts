@@ -22,7 +22,7 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
     return btoa(binary);
 }
 
-// Simple downsampling (decimation)
+// Better downsampling with averaging to prevent aliasing
 export function downsampleBuffer(buffer: Float32Array, inputRate: number, outputRate: number): Float32Array {
     if (inputRate === outputRate) return buffer;
     if (inputRate < outputRate) {
@@ -35,7 +35,17 @@ export function downsampleBuffer(buffer: Float32Array, inputRate: number, output
     const result = new Float32Array(newLength);
     
     for (let i = 0; i < newLength; i++) {
-        result[i] = buffer[Math.floor(i * sampleRateRatio)];
+        const start = Math.floor(i * sampleRateRatio);
+        const end = Math.min(buffer.length, Math.floor((i + 1) * sampleRateRatio));
+        let sum = 0;
+        let count = 0;
+        
+        for (let j = start; j < end; j++) {
+            sum += buffer[j];
+            count++;
+        }
+        
+        result[i] = count > 0 ? sum / count : buffer[start];
     }
     return result;
 }

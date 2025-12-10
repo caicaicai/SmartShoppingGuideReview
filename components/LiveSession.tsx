@@ -77,10 +77,14 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       console.log("🎬 Initializing Live Session...");
       
       // 1. Setup Media Stream (Camera + Mic)
+      // CRITICAL: Echo Cancellation is required to prevent the model from hearing itself
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           sampleRate: 16000, 
+          echoCancellation: true, 
+          noiseSuppression: true,
+          autoGainControl: true
         },
         video: {
           width: { ideal: 640 },
@@ -297,11 +301,12 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
     if (serverContent?.interrupted) {
         console.log("⚠️ Interrupted");
+        // Only stop currently playing sources, do not reset future timeline aggressively
         sourcesRef.current.forEach(s => s.stop());
         sourcesRef.current.clear();
-        nextStartTimeRef.current = ctx.currentTime;
         
-        // Reset streaming buffers on interrupt to avoid "ghost" text
+        // Reset buffers but keep UI mostly intact
+        nextStartTimeRef.current = ctx.currentTime;
         currentOutputTransRef.current = '';
         setStreamingModelText('');
     }
@@ -371,7 +376,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         {!hasStarted && (
             <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-6 text-center">
                 <h3 className="text-3xl font-bold mb-4">准备开始评估</h3>
-                <p className="mb-8 text-gray-300 max-w-md">我们将请求您的麦克风和摄像头权限。请确保环境安静。</p>
+                <p className="mb-8 text-gray-300 max-w-md">我们将请求您的麦克风和摄像头权限。请确保环境安静，并尽量使用耳机以获得最佳体验。</p>
                 <button 
                     onClick={startSession}
                     className="bg-green-600 hover:bg-green-700 text-white text-xl font-bold py-4 px-12 rounded-full shadow-lg transform transition hover:scale-105"
