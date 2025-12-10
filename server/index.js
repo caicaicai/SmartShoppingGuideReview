@@ -167,6 +167,19 @@ wss.on('connection', (ws) => {
                             onopen: () => {
                                 console.log(`[${clientId}] ✅ Gemini Session Established`);
                                 ws.send(JSON.stringify({ type: 'status', status: 'open' }));
+                                
+                                // FORCE START: Send a hidden text input to trigger the model's first turn immediately
+                                setTimeout(() => {
+                                    console.log(`[${clientId}] ⚡ Sending kickstart trigger to model...`);
+                                    session.sendRealtimeInput({
+                                        content: [
+                                            {
+                                                role: "user",
+                                                parts: [{ text: "（模拟开始，请直接开始第一句台词）" }] 
+                                            }
+                                        ]
+                                    });
+                                }, 200);
                             },
                             onmessage: (serverContent) => {
                                 // --- LOGGING LOGIC START ---
@@ -216,7 +229,7 @@ wss.on('connection', (ws) => {
                     const mimeType = msg.payload?.media?.mimeType;
                     // Verbose logging for non-audio inputs (images) to reduce noise
                     if (mimeType && mimeType.includes('image')) {
-                         console.log(`[${clientId}] 📤 Sending Video Frame (${Math.round(msg.payload.media.data.length/1024)}KB)`);
+                         // console.log(`[${clientId}] 📤 Sending Video Frame`); // Reduced noise
                     }
                     session.sendRealtimeInput(msg.payload);
                 } else {

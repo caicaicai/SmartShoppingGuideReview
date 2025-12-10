@@ -16,6 +16,10 @@ const JPEG_QUALITY = 0.6;
 const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [transcripts, setTranscripts] = useState<ChatMessage[]>([]);
+  // Streaming state for real-time subtitle effect
+  const [streamingUserText, setStreamingUserText] = useState('');
+  const [streamingModelText, setStreamingModelText] = useState('');
+  
   const [error, setError] = useState<string | null>(null);
   const [micActive, setMicActive] = useState(true);
   const [videoError, setVideoError] = useState(false);
@@ -40,7 +44,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   const evalImagesRef = useRef<string[]>([]);
   const lastEvalImageTimeRef = useRef<number>(0);
 
-  // Buffer for transcript assembly
+  // Buffer for transcript assembly (Backing source for final commit)
   const currentInputTransRef = useRef('');
   const currentOutputTransRef = useRef('');
 
@@ -236,11 +240,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         await ctx.resume();
     }
 
-    // IMPORTANT: The structure is nested! 
-    // message is the LiveServerMessage object.
-    // It contains { serverContent: { modelTurn: ... } }
     const serverContent = message.serverContent;
-    
     if (!serverContent) return;
 
     // 1. Audio Playback
@@ -269,22 +269,29 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         }
     }
 
-    // 2. Transcription
+    // 2. Transcription (Stream Accumulation)
     if (serverContent?.outputTranscription?.text) {
-        currentOutputTransRef.current += serverContent.outputTranscription.text;
+        const text = serverContent.outputTranscription.text;
+        currentOutputTransRef.current += text;
+        setStreamingModelText(prev => prev + text);
     }
     if (serverContent?.inputTranscription?.text) {
-        currentInputTransRef.current += serverContent.inputTranscription.text;
+        const text = serverContent.inputTranscription.text;
+        currentInputTransRef.current += text;
+        setStreamingUserText(prev => prev + text);
     }
 
+    // 3. Turn Complete (Commit)
     if (serverContent?.turnComplete) {
         if (currentInputTransRef.current.trim()) {
             setTranscripts(prev => [...prev, { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() }]);
             currentInputTransRef.current = '';
+            setStreamingUserText('');
         }
         if (currentOutputTransRef.current.trim()) {
             setTranscripts(prev => [...prev, { role: 'model', text: currentOutputTransRef.current, timestamp: Date.now() }]);
             currentOutputTransRef.current = '';
+            setStreamingModelText('');
         }
     }
 
@@ -293,12 +300,16 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         sourcesRef.current.forEach(s => s.stop());
         sourcesRef.current.clear();
         nextStartTimeRef.current = ctx.currentTime;
+        
+        // Reset streaming buffers on interrupt to avoid "ghost" text
         currentOutputTransRef.current = '';
+        setStreamingModelText('');
     }
   };
 
   const endSession = async () => {
     const finalHistory = [...transcripts];
+    // Push pending text if exists
     if (currentInputTransRef.current) finalHistory.push({ role: 'user', text: currentInputTransRef.current, timestamp: Date.now() });
     if (currentOutputTransRef.current) finalHistory.push({ role: 'model', text: currentOutputTransRef.current, timestamp: Date.now() });
 
@@ -335,9 +346,10 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   }, []);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll on transcript OR streaming text update
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [transcripts]);
+  }, [transcripts, streamingUserText, streamingModelText]);
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
@@ -449,6 +461,17 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                             <span className="font-bold opacity-75">{t.role === 'user' ? '导购' : '顾客'}:</span> {t.text}
                         </div>
                     ))}
+                    {/* Render Streaming Text (Pending) */}
+                    {streamingUserText && (
+                        <div className="text-sm text-green-300 opacity-80 animate-pulse">
+                            <span className="font-bold">导购:</span> {streamingUserText}...
+                        </div>
+                    )}
+                    {streamingModelText && (
+                        <div className="text-sm text-blue-300 opacity-80 animate-pulse">
+                            <span className="font-bold">顾客:</span> {streamingModelText}...
+                        </div>
+                    )}
                     <div ref={chatEndRef} />
                  </div>
             </div>
