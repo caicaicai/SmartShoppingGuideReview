@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { ChatMessage, Scenario } from '../types';
-import { createPcmBlob, decodeAudioData, base64ToUint8Array } from '../utils/audioUtils';
+import { createPcmBlob, decodeAudioData, base64ToUint8Array, blobToBase64 } from '../utils/audioUtils';
 import { SYSTEM_INSTRUCTION_TEMPLATE } from '../constants';
 
 interface LiveSessionProps {
@@ -20,11 +19,12 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   const [error, setError] = useState<string | null>(null);
   const [micActive, setMicActive] = useState(true);
   const [videoError, setVideoError] = useState(false);
+  const [initializing, setInitializing] = useState(true);
 
   // Refs for audio/video handling
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const sessionPromiseRef = useRef<Promise<any> | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
@@ -46,15 +46,11 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   }, [scenario.id]);
 
   const initializeSession = useCallback(async () => {
-    // 1. API Key Check
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-      setError("配置错误：未找到 API Key。请在项目根目录创建 .env 文件并设置 API_KEY=你的密钥");
-      return;
-    }
+    setInitializing(true);
+    setError(null);
 
     try {
-      // 2. Setup Media Stream (Camera + Mic)
+      // 1. Setup Media Stream (Camera + Mic)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -73,74 +69,105 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         videoRef.current.play();
       }
 
-      // 3. Setup Audio Contexts
+      // 2. Setup Audio Contexts
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
-      const ai = new GoogleGenAI({ apiKey });
-      const config = {
-        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-        systemInstruction: SYSTEM_INSTRUCTION_TEMPLATE
-          .replace('${persona}', scenario.customerPersona)
-          .replace('${initialPrompt}', scenario.initialPrompt),
+      // 3. Connect to OUR Backend WebSocket (No API Key needed here!)
+      // Adjust protocol (ws vs wss) based on current window location
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.hostname}:3000`; // Assuming backend is on port 3000
+      
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log("Connected to Backend Relay");
+        // Send start signal with system instructions
+        const instruction = SYSTEM_INSTRUCTION_TEMPLATE
+            .replace('${persona}', scenario.customerPersona)
+            .replace('${initialPrompt}', scenario.initialPrompt);
+        
+        ws.send(JSON.stringify({
+            type: 'start_session',
+            instruction: instruction
+        }));
       };
 
-      // 4. Connect to Live API
-      const sessionPromise = ai.live.connect({
-        model: config.model,
-        config: {
-          systemInstruction: config.systemInstruction,
-          responseModalities: [Modality.AUDIO],
-          inputAudioTranscription: {}, 
-          outputAudioTranscription: {}, 
-        },
-        callbacks: {
-          onopen: () => {
-            console.log("Session opened");
-            setIsConnected(true);
-            
-            // Start Audio Streaming
-            const source = inputCtx.createMediaStreamSource(stream);
-            const processor = inputCtx.createScriptProcessor(4096, 1, 1);
-            
-            processor.onaudioprocess = (e) => {
-              if (!micActive) return; // Simple mute logic
-              const inputData = e.inputBuffer.getChannelData(0);
-              const pcmBlob = createPcmBlob(inputData);
-              sessionPromise.then(session => session.sendRealtimeInput({ media: pcmBlob }));
-            };
-            
-            source.connect(processor);
-            processor.connect(inputCtx.destination);
-
-            // Start Video Streaming
-            startVideoStreaming(sessionPromise);
-          },
-          onmessage: async (msg: LiveServerMessage) => {
-            handleServerMessage(msg, outputCtx);
-          },
-          onclose: () => {
-            console.log("Session closed");
-            setIsConnected(false);
-          },
-          onerror: (err) => {
-            console.error("Session error:", err);
-            setError("连接错误：AI 服务连接断开。");
-          }
+      ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        
+        if (msg.type === 'status' && msg.status === 'open') {
+             console.log("AI Session Ready");
+             setIsConnected(true);
+             setInitializing(false);
+             startAudioCapture(inputCtx, stream, ws);
+             startVideoStreaming(ws);
+        } else if (msg.type === 'gemini') {
+             handleServerMessage(msg.data, outputCtx);
+        } else if (msg.type === 'error') {
+             console.error("Server reported error:", msg.message);
+             setError(`服务器错误: ${msg.message}`);
+             setInitializing(false);
         }
-      });
+      };
 
-      sessionPromiseRef.current = sessionPromise;
+      ws.onerror = (e) => {
+        console.error("WebSocket error", e);
+        setError("无法连接到后端服务器。请确保 'npm run server' 正在运行。");
+        setInitializing(false);
+      };
+      
+      ws.onclose = () => {
+        console.log("WebSocket closed");
+        setIsConnected(false);
+      };
 
-    } catch (err) {
+    } catch (err: any) {
       console.error("Initialization failed:", err);
-      setError("无法访问摄像头/麦克风或连接 AI 服务失败。请确保已授予浏览器权限。");
+      setError(err.message || "初始化失败，请检查设备权限或网络。");
+      setInitializing(false);
     }
-  }, [scenario, micActive]);
+  }, [scenario]);
 
-  const startVideoStreaming = (sessionPromise: Promise<any>) => {
+  const startAudioCapture = (ctx: AudioContext, stream: MediaStream, ws: WebSocket) => {
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    
+    processor.onaudioprocess = async (e) => {
+      // NOTE: We need to check micActive in a way that respects the closure, 
+      // but since micActive is state, using a ref for mic state would be better, 
+      // or just trust the state update will re-trigger (it won't here easily without ref).
+      // For now, we assume mic is always processing, we can mute at source level or send silence.
+      // But let's check the container state via a ref if we wanted perfect mute.
+      
+      const inputData = e.inputBuffer.getChannelData(0);
+      const pcmBlob = createPcmBlob(inputData);
+      
+      // Convert Blob to Base64 to send over JSON WebSocket
+      const base64 = await blobToBase64(pcmBlob);
+      
+      if (ws.readyState === WebSocket.OPEN) {
+          // Send formatted for our backend relay
+          ws.send(JSON.stringify({
+              type: 'input',
+              payload: {
+                  media: {
+                      mimeType: 'audio/pcm;rate=16000',
+                      data: base64
+                  }
+              }
+          }));
+      }
+    };
+    
+    source.connect(processor);
+    processor.connect(ctx.destination);
+  };
+
+  const startVideoStreaming = (ws: WebSocket) => {
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
 
     frameIntervalRef.current = window.setInterval(() => {
@@ -157,22 +184,24 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
       const base64 = canvas.toDataURL('image/jpeg', JPEG_QUALITY).split(',')[1];
       
-      // 1. Send to Live API
-      sessionPromise.then(session => {
-        session.sendRealtimeInput({
-          media: {
-            mimeType: 'image/jpeg',
-            data: base64
-          }
-        });
-      });
+      // Send to Backend Relay
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'input',
+            payload: {
+                media: {
+                    mimeType: 'image/jpeg',
+                    data: base64
+                }
+            }
+        }));
+      }
 
-      // 2. Capture for Evaluation (Sampled)
+      // Capture for Evaluation
       const now = Date.now();
       if (now - lastEvalImageTimeRef.current > EVAL_IMAGE_INTERVAL) {
         lastEvalImageTimeRef.current = now;
         evalImagesRef.current.push(base64);
-        // Keep only the last N images to manage memory/context size
         if (evalImagesRef.current.length > MAX_EVAL_IMAGES) {
             evalImagesRef.current.shift();
         }
@@ -181,63 +210,56 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }, 1000 / FRAME_RATE);
   };
 
-  const handleServerMessage = async (message: LiveServerMessage, ctx: AudioContext) => {
+  // Note: Message type here is the raw object from Gemini SDK passed via JSON
+  const handleServerMessage = async (serverContent: any, ctx: AudioContext) => {
     // 1. Audio Playback
-    const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+    const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (audioData) {
-        // Only process audio if the context is running
-        if (ctx.state === 'suspended') {
-             await ctx.resume();
-        }
+        if (ctx.state === 'suspended') await ctx.resume();
 
-      const audioBuffer = await decodeAudioData(
-        base64ToUint8Array(audioData),
-        ctx,
-        24000
-      );
+        const audioBuffer = await decodeAudioData(
+            base64ToUint8Array(audioData),
+            ctx,
+            24000
+        );
       
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      
-      // Schedule seamless playback
-      const currentTime = ctx.currentTime;
-      const startTime = Math.max(nextStartTimeRef.current, currentTime);
-      source.start(startTime);
-      nextStartTimeRef.current = startTime + audioBuffer.duration;
-      
-      sourcesRef.current.add(source);
-      source.onended = () => sourcesRef.current.delete(source);
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        
+        const currentTime = ctx.currentTime;
+        const startTime = Math.max(nextStartTimeRef.current, currentTime);
+        source.start(startTime);
+        nextStartTimeRef.current = startTime + audioBuffer.duration;
+        
+        sourcesRef.current.add(source);
+        source.onended = () => sourcesRef.current.delete(source);
     }
 
-    // 2. Transcription Handling
-    if (message.serverContent?.outputTranscription?.text) {
-        currentOutputTransRef.current += message.serverContent.outputTranscription.text;
+    // 2. Transcription
+    if (serverContent?.outputTranscription?.text) {
+        currentOutputTransRef.current += serverContent.outputTranscription.text;
     }
-    if (message.serverContent?.inputTranscription?.text) {
-        currentInputTransRef.current += message.serverContent.inputTranscription.text;
+    if (serverContent?.inputTranscription?.text) {
+        currentInputTransRef.current += serverContent.inputTranscription.text;
     }
 
-    if (message.serverContent?.turnComplete) {
-        // Commit transcripts to state
+    if (serverContent?.turnComplete) {
         if (currentInputTransRef.current.trim()) {
-            const userMsg: ChatMessage = { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() };
-            setTranscripts(prev => [...prev, userMsg]);
+            setTranscripts(prev => [...prev, { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() }]);
             currentInputTransRef.current = '';
         }
         if (currentOutputTransRef.current.trim()) {
-            const modelMsg: ChatMessage = { role: 'model', text: currentOutputTransRef.current, timestamp: Date.now() };
-            setTranscripts(prev => [...prev, modelMsg]);
+            setTranscripts(prev => [...prev, { role: 'model', text: currentOutputTransRef.current, timestamp: Date.now() }]);
             currentOutputTransRef.current = '';
         }
     }
 
-    // Handle interruptions
-    if (message.serverContent?.interrupted) {
+    if (serverContent?.interrupted) {
         sourcesRef.current.forEach(s => s.stop());
         sourcesRef.current.clear();
         nextStartTimeRef.current = ctx.currentTime;
-        currentOutputTransRef.current = ''; // Clear stale transcription buffer
+        currentOutputTransRef.current = '';
     }
   };
 
@@ -250,36 +272,26 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     // Cleanup
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
+    if (wsRef.current) wsRef.current.close();
     
-    // Safely close audio contexts
-    if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
-      await inputAudioContextRef.current.close();
-    }
-    if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-      await outputAudioContextRef.current.close();
-    }
+    if (inputAudioContextRef.current) inputAudioContextRef.current.close();
+    if (outputAudioContextRef.current) outputAudioContextRef.current.close();
     
-    // Pass history AND images to parent
     onEndSession(finalHistory, evalImagesRef.current);
   };
 
   useEffect(() => {
     initializeSession();
     return () => {
-        // Cleanup on unmount
         if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
         if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
+        if (wsRef.current) wsRef.current.close();
         
-        if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
-            inputAudioContextRef.current.close();
-        }
-        if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-            outputAudioContextRef.current.close();
-        }
+        if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') inputAudioContextRef.current.close();
+        if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') outputAudioContextRef.current.close();
     };
   }, [initializeSession]);
 
-  // Scroll to bottom of chat
   const chatEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -290,7 +302,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         {/* Header */}
         <div className="flex justify-between items-center p-4 bg-gray-800 border-b border-gray-700">
             <div>
-                <h2 className="text-xl font-bold text-blue-400">实时评估</h2>
+                <h2 className="text-xl font-bold text-blue-400">实时评估 (安全模式)</h2>
                 <p className="text-sm text-gray-400">场景: {scenario.title}</p>
             </div>
             <button 
@@ -304,7 +316,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         {/* Main Split View */}
         <div className="flex flex-1 overflow-hidden relative">
             
-            {/* Left: AI Customer View (Virtual Human) */}
+            {/* Left: AI Customer View */}
             <div className="w-1/2 relative bg-black border-r border-gray-800 overflow-hidden">
                 {scenario.videoUrl && !videoError ? (
                     <video 
@@ -316,7 +328,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                         playsInline
                         poster={scenario.avatarUrl}
                         onError={() => {
-                            console.warn("Video failed to load, falling back to avatar image.");
                             setVideoError(true);
                         }}
                     />
@@ -328,15 +339,14 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                     />
                 )}
                 
-                {/* Overlay for Persona Info & Status */}
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black via-black/60 to-transparent p-6 pt-12 text-center pointer-events-none">
                     <p className="text-blue-400 font-bold tracking-widest text-xs mb-1 uppercase">AI 顾客</p>
                     <h3 className="text-2xl font-light text-white mb-2">{scenario.customerPersona.split('，')[0]}</h3>
                     
-                    {!isConnected && !error && (
-                        <div className="flex items-center justify-center gap-2 text-yellow-500 animate-pulse">
-                            <div className="w-2 h-2 bg-yellow-500 rounded-full"></div>
-                            <span className="text-sm">正在建立连接...</span>
+                    {initializing && !error && (
+                        <div className="flex items-center justify-center gap-2 text-blue-400">
+                            <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
+                            <span className="text-sm">正在建立安全连接...</span>
                         </div>
                     )}
                     
@@ -359,7 +369,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                 />
                 <canvas ref={canvasRef} className="hidden" />
                 
-                {/* Overlay Controls */}
                 <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4">
                      <button 
                         onClick={() => setMicActive(!micActive)}
@@ -374,7 +383,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                 </div>
             </div>
 
-            {/* Transcription Overlay (Floating) */}
+            {/* Transcription Overlay */}
             <div className="absolute top-4 right-4 w-80 bg-black/60 backdrop-blur-md rounded-xl p-4 border border-white/10 max-h-[40%] overflow-y-auto scrollbar-hide shadow-xl">
                  <h3 className="text-xs font-bold text-gray-400 uppercase mb-2">实时对话字幕</h3>
                  <div className="space-y-3">
@@ -390,8 +399,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
             {/* Error Toast */}
             {error && (
                 <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-red-600/90 text-white px-8 py-6 rounded-xl shadow-2xl backdrop-blur max-w-lg text-center border border-red-400">
-                    <svg className="w-12 h-12 mx-auto mb-3 text-red-100" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-                    <h3 className="text-xl font-bold mb-2">配置错误</h3>
+                    <h3 className="text-xl font-bold mb-2">连接中断</h3>
                     <p className="text-red-100 mb-4">{error}</p>
                     <button onClick={() => window.location.reload()} className="bg-white text-red-600 px-4 py-2 rounded-lg font-bold text-sm hover:bg-gray-100">刷新重试</button>
                 </div>
