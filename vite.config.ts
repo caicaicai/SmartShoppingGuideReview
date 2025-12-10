@@ -13,5 +13,9 @@ export default defineConfig(({ mode }) => {
       // Polyfill process.env.API_KEY so the existing code works without changes
       'process.env.API_KEY': JSON.stringify(env.API_KEY),
     },
+    server: {
+      host: '0.0.0.0', // Ensure it binds to all network interfaces
+      allowedHosts: true, // Allow all hosts (bypass the host check for cloud IDEs like code.xiaocaicai.com)
+    },
   };
 });
