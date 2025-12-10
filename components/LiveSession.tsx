@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { ChatMessage, Scenario } from '../types';
-import { createPcmBlob, decodeAudioData, base64ToUint8Array } from '../utils/audioUtils';
+import { createPcmBlob, decodeAudioData, base64ToUint8Array, downsampleBuffer } from '../utils/audioUtils';
 import { SYSTEM_INSTRUCTION_TEMPLATE } from '../constants';
 
 interface LiveSessionProps {
@@ -27,6 +27,9 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   const wsRef = useRef<WebSocket | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
+  // IMPORTANT: Keep processor in ref to prevent Garbage Collection
+  const processorRef = useRef<ScriptProcessorNode | null>(null); 
+  
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const frameIntervalRef = useRef<number | null>(null);
@@ -67,7 +70,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 16000,
+          sampleRate: 16000, // Try to request 16k
         },
         video: {
           width: { ideal: 640 },
@@ -83,9 +86,12 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       }
 
       // 2. Setup Audio Contexts
-      // Using standard AudioContext, browser will handle resampling if hardware doesn't support 16k
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      // We accept whatever the browser gives us, then we downsample manually if needed.
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      
+      console.log(`🎤 Input Sample Rate: ${inputCtx.sampleRate}`);
+      
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
       
@@ -147,19 +153,29 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   }, [scenario]);
 
   const startAudioCapture = (ctx: AudioContext, stream: MediaStream, ws: WebSocket) => {
-    console.log("🎤 Starting Audio Capture");
+    console.log("🎤 Starting Audio Capture Chain");
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(4096, 1, 1);
+    processorRef.current = processor; // Prevent GC
     
+    let chunkCount = 0;
+
     processor.onaudioprocess = async (e) => {
-      // If mic is muted by UI, do not send data, but keep processor running to avoid timing issues
-      // Note: We access the state directly via a ref or just let it flow silence if needed.
-      // Here we will just send it.
+      // If mic is muted via UI, we can just return silence or not send.
+      // But for stability, we continue processing.
       
       const inputData = e.inputBuffer.getChannelData(0);
       
-      // FIX: createPcmBlob returns { data: "base64...", mimeType: "..." }
-      const pcmGenAiContent = createPcmBlob(inputData);
+      // Downsample to 16000Hz if necessary
+      const resampledData = downsampleBuffer(inputData, ctx.sampleRate, 16000);
+      
+      const pcmGenAiContent = createPcmBlob(resampledData);
+      
+      // Visual feedback in logs every ~2 seconds (assuming 4096 buffer @ 48k is ~0.08s, so every 25 chunks)
+      chunkCount++;
+      if (chunkCount % 50 === 0) {
+          // console.log("🎤 Sending audio chunk #" + chunkCount);
+      }
       
       if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
@@ -230,7 +246,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     // 1. Audio Playback
     const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (audioData) {
-        // console.log("🔊 Received Audio Chunk");
+        // console.log("🔊 Received Audio Response");
         try {
             const audioBuffer = await decodeAudioData(
                 base64ToUint8Array(audioData),
@@ -263,7 +279,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }
 
     if (serverContent?.turnComplete) {
-        // console.log("🔄 Turn Complete");
+        console.log("🔄 Turn Complete");
         if (currentInputTransRef.current.trim()) {
             setTranscripts(prev => [...prev, { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() }]);
             currentInputTransRef.current = '';
@@ -292,6 +308,12 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
     if (wsRef.current) wsRef.current.close();
     
+    // Cleanup Processor
+    if (processorRef.current) {
+        processorRef.current.disconnect();
+        processorRef.current = null;
+    }
+
     if (inputAudioContextRef.current) inputAudioContextRef.current.close();
     if (outputAudioContextRef.current) outputAudioContextRef.current.close();
     
@@ -304,6 +326,10 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
         if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
         if (wsRef.current) wsRef.current.close();
+        if (processorRef.current) {
+            processorRef.current.disconnect();
+            processorRef.current = null;
+        }
         
         if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') inputAudioContextRef.current.close();
         if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') outputAudioContextRef.current.close();

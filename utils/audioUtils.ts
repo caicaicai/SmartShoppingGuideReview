@@ -14,12 +14,30 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
     let binary = '';
     const bytes = new Uint8Array(buffer);
     const len = bytes.byteLength;
-    // Chunking to avoid stack overflow on large buffers (though rare for audio chunks)
+    // Chunking to avoid stack overflow on large buffers
     const chunkSize = 8192; 
     for (let i = 0; i < len; i += chunkSize) {
         binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
     }
     return btoa(binary);
+}
+
+// Simple downsampling (decimation)
+export function downsampleBuffer(buffer: Float32Array, inputRate: number, outputRate: number): Float32Array {
+    if (inputRate === outputRate) return buffer;
+    if (inputRate < outputRate) {
+        console.warn("Upsampling not supported in this demo, sending raw.");
+        return buffer;
+    }
+    
+    const sampleRateRatio = inputRate / outputRate;
+    const newLength = Math.round(buffer.length / sampleRateRatio);
+    const result = new Float32Array(newLength);
+    
+    for (let i = 0; i < newLength; i++) {
+        result[i] = buffer[Math.floor(i * sampleRateRatio)];
+    }
+    return result;
 }
 
 // Returns a GenAI SDK compatible object, NOT a browser Blob

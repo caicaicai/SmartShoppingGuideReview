@@ -167,7 +167,8 @@ wss.on('connection', (ws) => {
                                 ws.send(JSON.stringify({ type: 'status', status: 'open' }));
                             },
                             onmessage: (serverContent) => {
-                                // console.log("📥 Received data from Gemini"); // Too verbose for audio chunks, uncomment if needed
+                                // Log basic stats but not full content to avoid spam
+                                // console.log("📥 Received data from Gemini"); 
                                 ws.send(JSON.stringify({ type: 'gemini', data: serverContent }));
                             },
                             onclose: () => {
@@ -186,7 +187,6 @@ wss.on('connection', (ws) => {
                 }
             } else if (msg.type === 'input') {
                 if (session) {
-                    // console.log("📤 Sending input to Gemini", msg.payload.media?.mimeType); // Too verbose
                     session.sendRealtimeInput(msg.payload);
                 } else {
                     console.warn("⚠️ Client sent input but no Gemini session is active.");
