@@ -48,6 +48,9 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   const currentInputTransRef = useRef('');
   const currentOutputTransRef = useRef('');
 
+  // Ref to hold the latest message handler to avoid stale closures in WS callback
+  const handleServerMessageRef = useRef<(msg: any, ctx: AudioContext) => Promise<void>>(async () => {});
+
   // Reset video error when scenario changes
   useEffect(() => {
     setVideoError(false);
@@ -142,7 +145,8 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
              startAudioCapture(inputCtx, stream, ws);
              startVideoStreaming(ws);
         } else if (msg.type === 'gemini') {
-             handleServerMessage(msg.data, outputCtx);
+             // DELEGATE TO REF to ensure we always use the latest closure
+             await handleServerMessageRef.current(msg.data, outputCtx);
         } else if (msg.type === 'error') {
              console.error("❌ Server reported error:", msg.message);
              setError(`服务器错误: ${msg.message}`);
@@ -323,6 +327,11 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }
   };
 
+  // Keep the ref updated with the latest function from the current render
+  useEffect(() => {
+    handleServerMessageRef.current = handleServerMessage;
+  });
+
   const endSession = async () => {
     const finalHistory = [...transcripts];
     // Push pending text if exists
@@ -469,7 +478,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
             </div>
 
             {/* Transcription Overlay */}
-            <div className="absolute top-4 right-4 w-80 bg-black/60 backdrop-blur-md rounded-xl p-4 border border-white/10 max-h-[40%] overflow-y-auto scrollbar-hide shadow-xl">
+            <div className="absolute top-4 right-4 w-80 bg-black/60 backdrop-blur-md rounded-xl p-4 border border-white/10 max-h-[60%] overflow-y-auto shadow-xl transition-all">
                  <h3 className="text-xs font-bold text-gray-400 uppercase mb-2">实时对话字幕</h3>
                  <div className="space-y-3">
                     {transcripts.map((t, idx) => (
