@@ -4,13 +4,18 @@ import dotenv from 'dotenv';
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { WebSocketServer } from 'ws';
 import http from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 // Load environment variables
 dotenv.config();
 const API_KEY = process.env.API_KEY || process.env.GEMINI_API_KEY;
+const isProduction = process.env.NODE_ENV === 'production';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 // Increase payload limit for image uploads (base64)
 app.use(express.json({ limit: '50mb' }));
@@ -125,120 +130,21 @@ app.post('/api/evaluate', async (req, res) => {
   }
 });
 
-// --- WebSocket Relay Server ---
+
+// --- Unified Server Setup ---
 
 const server = http.createServer(app);
+
+// 1. WebSocket Server (Attaches to the HTTP server)
 const wss = new WebSocketServer({ server });
 
-wss.on('connection', async (ws) => {
-  console.log('Client connected to WebSocket Relay');
-  
-  if (!API_KEY) {
-    ws.close(1008, "API Key missing on server");
-    return;
-  }
-
-  let liveSession = null;
-
-  try {
-    // 1. Initialize Gemini Live Session on the SERVER
-    liveSession = await ai.live.connect({
-      model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-      config: {
-        responseModalities: [Modality.AUDIO],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
-      },
-      callbacks: {
-        onopen: () => {
-          console.log('Gemini Live API Connected');
-          ws.send(JSON.stringify({ type: 'status', message: 'connected' }));
-        },
-        onmessage: (msg) => {
-          // Forward Gemini messages to Frontend
-          ws.send(JSON.stringify({ type: 'gemini_message', content: msg }));
-        },
-        onclose: () => {
-          console.log('Gemini Live API Closed');
-          ws.close();
-        },
-        onerror: (err) => {
-          console.error('Gemini Live API Error:', err);
-          ws.send(JSON.stringify({ type: 'error', message: 'AI Service Error' }));
-        }
-      }
-    });
-
-    // 2. Handle Messages from Frontend
-    ws.on('message', async (data) => {
-      try {
-        const parsed = JSON.parse(data);
-        
-        if (parsed.type === 'config') {
-             // Allow frontend to set system instructions via the relay
-             // Note: In a real app, you might validate this or hardcode it on server for safety
-             // But passing scenario data is fine.
-             // However, `live.connect` config is immutable after connection usually, 
-             // but we can send tool responses or content updates.
-             // For simplicity, we assume session is established.
-        } else if (parsed.type === 'audio') {
-            // Forward Audio Chunk
-            await liveSession.sendRealtimeInput({
-                media: {
-                    mimeType: 'audio/pcm;rate=16000',
-                    data: parsed.data // base64
-                }
-            });
-        } else if (parsed.type === 'image') {
-             // Forward Image Chunk
-             await liveSession.sendRealtimeInput({
-                media: {
-                    mimeType: 'image/jpeg',
-                    data: parsed.data // base64
-                }
-            });
-        } else if (parsed.type === 'setup') {
-           // Wait, we need to send the system instruction?
-           // The SDK `connect` takes config.
-           // Since we already connected, we can't change systemInstruction easily without reconnection.
-           // IMPROVEMENT: We should wait for frontend 'setup' message BEFORE connecting to Gemini.
-        }
-      } catch (e) {
-        console.error("Error processing frontend message:", e);
-      }
-    });
-
-    ws.on('close', () => {
-      console.log('Client disconnected');
-      if (liveSession) {
-          // There isn't an explicit close method on the session object exposed by connect's promise result directly
-          // in some versions, but the connection drops when the object is GC'd or we can rely on timeout.
-          // Ideally, we close the stream if we had access to the underlying socket.
-      }
-    });
-
-  } catch (err) {
-    console.error("Failed to connect to Gemini:", err);
-    ws.close(1011, "Failed to connect to AI Service");
-  }
-});
-
-// Handling the specific case where we need the system instruction DYNAMICALLY based on frontend scenario
-// We need to refactor the connection logic to wait for the frontend to say "Start this scenario".
-
-// Let's replace the wss.on('connection') logic with a delayed connection approach.
-wss.removeAllListeners('connection');
-
+// WebSocket Logic
 wss.on('connection', (ws) => {
     let session = null;
-
     ws.on('message', async (rawMsg) => {
         const msg = JSON.parse(rawMsg);
-
         if (msg.type === 'start_session') {
-            // Frontend sends the scenario details, THEN we connect to Gemini
             const { instruction } = msg;
-            
             try {
                 session = await ai.live.connect({
                     model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -265,14 +171,41 @@ wss.on('connection', (ws) => {
             }
         }
     });
+    ws.on('close', () => { /* Cleanup */ });
+});
 
-    ws.on('close', () => {
-        // Cleanup if needed
+// 2. Frontend Serving Logic (Vite Middleware or Static)
+
+async function setupServer() {
+  if (!isProduction) {
+    // Development: Use Vite as middleware
+    console.log("🚀 Starting in Development Mode (Vite Middleware)");
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa', // Handle SPA fallbacks
     });
-});
+    app.use(vite.middlewares);
+  } else {
+    // Production: Serve static files from /dist
+    console.log("📦 Starting in Production Mode (Static Files)");
+    const distPath = path.resolve(__dirname, '../dist');
+    if (fs.existsSync(distPath)) {
+        app.use(express.static(distPath));
+        // Fallback for SPA routing
+        app.get('*', (req, res) => {
+            res.sendFile(path.join(distPath, 'index.html'));
+        });
+    } else {
+        console.error("❌ 'dist' directory not found. Did you run 'npm run build'?");
+    }
+  }
 
+  server.listen(port, () => {
+    console.log(`\n==================================================`);
+    console.log(`✅ Server running at http://localhost:${port}`);
+    console.log(`==================================================\n`);
+  });
+}
 
-server.listen(port, () => {
-  console.log(`Backend server running at http://localhost:${port}`);
-  console.log(`Secure mode: WebSockets proxying to Gemini Live API.`);
-});
+setupServer();

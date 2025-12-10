@@ -5,13 +5,10 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: '0.0.0.0', 
-    allowedHosts: true,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:3000', // Forward API requests
-        changeOrigin: true,
-      }
+    // No proxy needed anymore as Vite runs WITHIN the backend server in dev mode
+    hmr: {
+        // Ensure HMR uses the correct port if running behind a different proxy (optional but good practice)
+        // clientPort: 3000 
     }
   },
 });

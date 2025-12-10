@@ -75,10 +75,12 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
-      // 3. Connect to OUR Backend WebSocket (No API Key needed here!)
-      // Adjust protocol (ws vs wss) based on current window location
+      // 3. Connect to Backend WebSocket
+      // Dynamic URL: Uses the same host/port as the web page.
+      // This works perfectly with Nginx proxying.
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.hostname}:3000`; // Assuming backend is on port 3000
+      const host = window.location.host; // includes hostname and port
+      const wsUrl = `${protocol}//${host}`; 
       
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -116,7 +118,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
       ws.onerror = (e) => {
         console.error("WebSocket error", e);
-        setError("无法连接到后端服务器。请确保 'npm run server' 正在运行。");
+        setError("无法连接到后端服务器。请确保服务已启动。");
         setInitializing(false);
       };
       
@@ -137,20 +139,11 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     
     processor.onaudioprocess = async (e) => {
-      // NOTE: We need to check micActive in a way that respects the closure, 
-      // but since micActive is state, using a ref for mic state would be better, 
-      // or just trust the state update will re-trigger (it won't here easily without ref).
-      // For now, we assume mic is always processing, we can mute at source level or send silence.
-      // But let's check the container state via a ref if we wanted perfect mute.
-      
       const inputData = e.inputBuffer.getChannelData(0);
       const pcmBlob = createPcmBlob(inputData);
-      
-      // Convert Blob to Base64 to send over JSON WebSocket
       const base64 = await blobToBase64(pcmBlob);
       
       if (ws.readyState === WebSocket.OPEN) {
-          // Send formatted for our backend relay
           ws.send(JSON.stringify({
               type: 'input',
               payload: {
@@ -184,7 +177,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
 
       const base64 = canvas.toDataURL('image/jpeg', JPEG_QUALITY).split(',')[1];
       
-      // Send to Backend Relay
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
             type: 'input',
@@ -210,7 +202,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }, 1000 / FRAME_RATE);
   };
 
-  // Note: Message type here is the raw object from Gemini SDK passed via JSON
   const handleServerMessage = async (serverContent: any, ctx: AudioContext) => {
     // 1. Audio Playback
     const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
@@ -264,12 +255,10 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   };
 
   const endSession = async () => {
-    // Ensure any partial transcripts are captured
     const finalHistory = [...transcripts];
     if (currentInputTransRef.current) finalHistory.push({ role: 'user', text: currentInputTransRef.current, timestamp: Date.now() });
     if (currentOutputTransRef.current) finalHistory.push({ role: 'model', text: currentOutputTransRef.current, timestamp: Date.now() });
 
-    // Cleanup
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
     if (wsRef.current) wsRef.current.close();
@@ -302,7 +291,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         {/* Header */}
         <div className="flex justify-between items-center p-4 bg-gray-800 border-b border-gray-700">
             <div>
-                <h2 className="text-xl font-bold text-blue-400">实时评估 (安全模式)</h2>
+                <h2 className="text-xl font-bold text-blue-400">实时评估 (一体化服务)</h2>
                 <p className="text-sm text-gray-400">场景: {scenario.title}</p>
             </div>
             <button 
@@ -346,7 +335,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                     {initializing && !error && (
                         <div className="flex items-center justify-center gap-2 text-blue-400">
                             <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
-                            <span className="text-sm">正在建立安全连接...</span>
+                            <span className="text-sm">正在连接服务...</span>
                         </div>
                     )}
                     
