@@ -253,7 +253,56 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     const serverContent = message.serverContent;
     if (!serverContent) return;
 
-    // 1. Audio Playback
+    // --- 1. HANDLE TEXT (Synchronous & Critical for State) ---
+    // Process text FIRST to prevent race conditions where audio decoding blocks text accumulation
+    
+    // Transcription (Stream Accumulation)
+    if (serverContent?.outputTranscription?.text) {
+        const text = serverContent.outputTranscription.text;
+        currentOutputTransRef.current += text;
+        setStreamingModelText(prev => prev + text);
+    }
+    if (serverContent?.inputTranscription?.text) {
+        const text = serverContent.inputTranscription.text;
+        currentInputTransRef.current += text;
+        setStreamingUserText(prev => prev + text);
+    }
+
+    // Turn Complete (Commit)
+    if (serverContent?.turnComplete) {
+        if (currentInputTransRef.current.trim()) {
+            setTranscripts(prev => [...prev, { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() }]);
+            currentInputTransRef.current = '';
+            setStreamingUserText('');
+        }
+        if (currentOutputTransRef.current.trim()) {
+            setTranscripts(prev => [...prev, { role: 'model', text: currentOutputTransRef.current, timestamp: Date.now() }]);
+            currentOutputTransRef.current = '';
+            setStreamingModelText('');
+        }
+    }
+
+    // Interrupted
+    if (serverContent?.interrupted) {
+        console.log("⚠️ Interrupted");
+        sourcesRef.current.forEach(s => s.stop());
+        sourcesRef.current.clear();
+        
+        if (currentOutputTransRef.current.trim()) {
+            setTranscripts(prev => [...prev, { 
+                role: 'model', 
+                text: currentOutputTransRef.current + " (被打断)", 
+                timestamp: Date.now() 
+            }]);
+        }
+        
+        nextStartTimeRef.current = ctx.currentTime;
+        currentOutputTransRef.current = '';
+        setStreamingModelText('');
+    }
+
+    // --- 2. HANDLE AUDIO (Async / Heavy) ---
+    // Process audio LAST so await doesn't block text updates in the event loop
     const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (audioData) {
         try {
@@ -277,53 +326,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         } catch (e) {
             console.error("Error decoding audio:", e);
         }
-    }
-
-    // 2. Transcription (Stream Accumulation)
-    if (serverContent?.outputTranscription?.text) {
-        const text = serverContent.outputTranscription.text;
-        currentOutputTransRef.current += text;
-        setStreamingModelText(prev => prev + text);
-    }
-    if (serverContent?.inputTranscription?.text) {
-        const text = serverContent.inputTranscription.text;
-        currentInputTransRef.current += text;
-        setStreamingUserText(prev => prev + text);
-    }
-
-    // 3. Turn Complete (Commit)
-    if (serverContent?.turnComplete) {
-        if (currentInputTransRef.current.trim()) {
-            setTranscripts(prev => [...prev, { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() }]);
-            currentInputTransRef.current = '';
-            setStreamingUserText('');
-        }
-        if (currentOutputTransRef.current.trim()) {
-            setTranscripts(prev => [...prev, { role: 'model', text: currentOutputTransRef.current, timestamp: Date.now() }]);
-            currentOutputTransRef.current = '';
-            setStreamingModelText('');
-        }
-    }
-
-    if (serverContent?.interrupted) {
-        console.log("⚠️ Interrupted");
-        // Only stop currently playing sources, do not reset future timeline aggressively
-        sourcesRef.current.forEach(s => s.stop());
-        sourcesRef.current.clear();
-        
-        // FIX: Commit partial transcript so it doesn't disappear when interrupted
-        if (currentOutputTransRef.current.trim()) {
-            setTranscripts(prev => [...prev, { 
-                role: 'model', 
-                text: currentOutputTransRef.current + " (被打断)", 
-                timestamp: Date.now() 
-            }]);
-        }
-        
-        // Reset buffers
-        nextStartTimeRef.current = ctx.currentTime;
-        currentOutputTransRef.current = '';
-        setStreamingModelText('');
     }
   };
 
