@@ -135,12 +135,12 @@ app.post('/api/evaluate', async (req, res) => {
 
 const server = http.createServer(app);
 
-// 1. WebSocket Server (Attaches to the HTTP server)
-const wss = new WebSocketServer({ server });
+// 1. WebSocket Server (Detached mode to allow path filtering)
+const wss = new WebSocketServer({ noServer: true });
 
 // WebSocket Logic
 wss.on('connection', (ws) => {
-    console.log("🔌 New Client Connected via WebSocket");
+    console.log("🔌 New Client Connected via WebSocket (/ws)");
     let session = null;
 
     ws.on('message', async (rawMsg) => {
@@ -167,8 +167,7 @@ wss.on('connection', (ws) => {
                                 ws.send(JSON.stringify({ type: 'status', status: 'open' }));
                             },
                             onmessage: (serverContent) => {
-                                // Log basic stats but not full content to avoid spam
-                                // console.log("📥 Received data from Gemini"); 
+                                // IMPORTANT: pass the WHOLE server message structure
                                 ws.send(JSON.stringify({ type: 'gemini', data: serverContent }));
                             },
                             onclose: () => {
@@ -189,7 +188,7 @@ wss.on('connection', (ws) => {
                 if (session) {
                     session.sendRealtimeInput(msg.payload);
                 } else {
-                    console.warn("⚠️ Client sent input but no Gemini session is active.");
+                    // Silent fail for keep-alives or pre-connection data
                 }
             }
         } catch (err) {
@@ -204,11 +203,21 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         console.log("🔌 Client Disconnected");
         if (session) {
-            // session.close() is not always available/needed on some SDK versions, but good practice if exists or just let GC handle it
-            console.log("🧹 Cleaning up Gemini Session");
             session = null;
         }
     });
+});
+
+// Handle Upgrade Manually to separate /ws from Vite's HMR
+server.on('upgrade', (request, socket, head) => {
+  if (request.url === '/ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    // Let Vite/Express handle other upgrades (crucial for HMR)
+    // No action needed, just don't destroy socket
+  }
 });
 
 // 2. Frontend Serving Logic (Vite Middleware or Static)

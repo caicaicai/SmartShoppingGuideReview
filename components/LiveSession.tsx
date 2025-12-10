@@ -19,7 +19,8 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   const [error, setError] = useState<string | null>(null);
   const [micActive, setMicActive] = useState(true);
   const [videoError, setVideoError] = useState(false);
-  const [initializing, setInitializing] = useState(true);
+  const [initializing, setInitializing] = useState(false);
+  const [hasStarted, setHasStarted] = useState(false); // User gesture check
 
   // Refs for audio/video handling
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -59,8 +60,13 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }
   };
 
-  const initializeSession = useCallback(async () => {
+  const startSession = async () => {
+    setHasStarted(true);
     setInitializing(true);
+    await initializeSession();
+  };
+
+  const initializeSession = useCallback(async () => {
     setError(null);
 
     try {
@@ -70,7 +76,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 16000, // Try to request 16k
+          sampleRate: 16000, 
         },
         video: {
           width: { ideal: 640 },
@@ -86,7 +92,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       }
 
       // 2. Setup Audio Contexts
-      // We accept whatever the browser gives us, then we downsample manually if needed.
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
@@ -100,7 +105,8 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       // 3. Connect to Backend WebSocket
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.host; // includes hostname and port
-      const wsUrl = `${protocol}//${host}`; 
+      // IMPORTANT: Use /ws to avoid conflict with Vite HMR
+      const wsUrl = `${protocol}//${host}/ws`; 
       
       console.log(`🔌 Connecting to WebSocket at ${wsUrl}`);
       const ws = new WebSocket(wsUrl);
@@ -158,24 +164,12 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     processorRef.current = processor; // Prevent GC
     
-    let chunkCount = 0;
-
     processor.onaudioprocess = async (e) => {
-      // If mic is muted via UI, we can just return silence or not send.
-      // But for stability, we continue processing.
-      
       const inputData = e.inputBuffer.getChannelData(0);
       
       // Downsample to 16000Hz if necessary
       const resampledData = downsampleBuffer(inputData, ctx.sampleRate, 16000);
-      
       const pcmGenAiContent = createPcmBlob(resampledData);
-      
-      // Visual feedback in logs every ~2 seconds (assuming 4096 buffer @ 48k is ~0.08s, so every 25 chunks)
-      chunkCount++;
-      if (chunkCount % 50 === 0) {
-          // console.log("🎤 Sending audio chunk #" + chunkCount);
-      }
       
       if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
@@ -195,7 +189,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   };
 
   const startVideoStreaming = (ws: WebSocket) => {
-    console.log("📹 Starting Video Streaming");
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
 
     frameIntervalRef.current = window.setInterval(() => {
@@ -237,16 +230,22 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }, 1000 / FRAME_RATE);
   };
 
-  const handleServerMessage = async (serverContent: any, ctx: AudioContext) => {
+  const handleServerMessage = async (message: any, ctx: AudioContext) => {
     // Ensure context is running when we receive data
     if (ctx.state === 'suspended') {
         await ctx.resume();
     }
 
+    // IMPORTANT: The structure is nested! 
+    // message is the LiveServerMessage object.
+    // It contains { serverContent: { modelTurn: ... } }
+    const serverContent = message.serverContent;
+    
+    if (!serverContent) return;
+
     // 1. Audio Playback
     const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (audioData) {
-        // console.log("🔊 Received Audio Response");
         try {
             const audioBuffer = await decodeAudioData(
                 base64ToUint8Array(audioData),
@@ -279,7 +278,6 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }
 
     if (serverContent?.turnComplete) {
-        console.log("🔄 Turn Complete");
         if (currentInputTransRef.current.trim()) {
             setTranscripts(prev => [...prev, { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() }]);
             currentInputTransRef.current = '';
@@ -321,7 +319,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   };
 
   useEffect(() => {
-    initializeSession();
+    // Do NOT auto initialize. Wait for user gesture.
     return () => {
         if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
         if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
@@ -334,7 +332,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') inputAudioContextRef.current.close();
         if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') outputAudioContextRef.current.close();
     };
-  }, [initializeSession]);
+  }, []);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -342,7 +340,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   }, [transcripts]);
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden" onClick={ensureAudioContext}>
+    <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
         {/* Header */}
         <div className="flex justify-between items-center p-4 bg-gray-800 border-b border-gray-700">
             <div>
@@ -356,6 +354,20 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                 结束评估
             </button>
         </div>
+
+        {/* Start Overlay - Critical for Audio Context */}
+        {!hasStarted && (
+            <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-6 text-center">
+                <h3 className="text-3xl font-bold mb-4">准备开始评估</h3>
+                <p className="mb-8 text-gray-300 max-w-md">我们将请求您的麦克风和摄像头权限。请确保环境安静。</p>
+                <button 
+                    onClick={startSession}
+                    className="bg-green-600 hover:bg-green-700 text-white text-xl font-bold py-4 px-12 rounded-full shadow-lg transform transition hover:scale-105"
+                >
+                    点击开始
+                </button>
+            </div>
+        )}
 
         {/* Main Split View */}
         <div className="flex flex-1 overflow-hidden relative">
