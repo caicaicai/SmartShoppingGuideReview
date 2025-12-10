@@ -201,9 +201,10 @@ async function setupServer() {
     }
   }
 
-  server.listen(port, () => {
+  // Bind to 0.0.0.0 to listen on all interfaces
+  server.listen(port, '0.0.0.0', () => {
     console.log(`\n==================================================`);
-    console.log(`✅ Server running at http://localhost:${port}`);
+    console.log(`✅ Server running at http://0.0.0.0:${port}`);
     console.log(`==================================================\n`);
   });
 }
