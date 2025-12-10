@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { ChatMessage, Scenario } from '../types';
-import { createPcmBlob, decodeAudioData, base64ToUint8Array, blobToBase64 } from '../utils/audioUtils';
+import { createPcmBlob, decodeAudioData, base64ToUint8Array } from '../utils/audioUtils';
 import { SYSTEM_INSTRUCTION_TEMPLATE } from '../constants';
 
 interface LiveSessionProps {
@@ -45,11 +45,24 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     setVideoError(false);
   }, [scenario.id]);
 
+  const ensureAudioContext = async () => {
+    if (outputAudioContextRef.current && outputAudioContextRef.current.state === 'suspended') {
+        console.log("🔊 Resuming Output Audio Context");
+        await outputAudioContextRef.current.resume();
+    }
+    if (inputAudioContextRef.current && inputAudioContextRef.current.state === 'suspended') {
+        console.log("🎤 Resuming Input Audio Context");
+        await inputAudioContextRef.current.resume();
+    }
+  };
+
   const initializeSession = useCallback(async () => {
     setInitializing(true);
     setError(null);
 
     try {
+      console.log("🎬 Initializing Live Session...");
+      
       // 1. Setup Media Stream (Camera + Mic)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -70,21 +83,25 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
       }
 
       // 2. Setup Audio Contexts
+      // Using standard AudioContext, browser will handle resampling if hardware doesn't support 16k
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
+      
+      await ensureAudioContext();
 
       // 3. Connect to Backend WebSocket
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.host; // includes hostname and port
       const wsUrl = `${protocol}//${host}`; 
       
+      console.log(`🔌 Connecting to WebSocket at ${wsUrl}`);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log("Connected to Backend Relay");
+        console.log("✅ WebSocket Connected");
         const instruction = SYSTEM_INSTRUCTION_TEMPLATE
             .replace('${persona}', scenario.customerPersona)
             .replace('${initialPrompt}', scenario.initialPrompt);
@@ -99,7 +116,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         const msg = JSON.parse(event.data);
         
         if (msg.type === 'status' && msg.status === 'open') {
-             console.log("AI Session Ready");
+             console.log("🟢 AI Session Ready - Starting Streams");
              setIsConnected(true);
              setInitializing(false);
              startAudioCapture(inputCtx, stream, ws);
@@ -107,39 +124,41 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
         } else if (msg.type === 'gemini') {
              handleServerMessage(msg.data, outputCtx);
         } else if (msg.type === 'error') {
-             console.error("Server reported error:", msg.message);
+             console.error("❌ Server reported error:", msg.message);
              setError(`服务器错误: ${msg.message}`);
              setInitializing(false);
         }
       };
 
       ws.onerror = (e) => {
-        console.error("WebSocket error", e);
-        // Do not fail immediately on error during init, wait for close
+        console.error("❌ WebSocket error", e);
       };
       
-      ws.onclose = () => {
-        console.log("WebSocket closed");
+      ws.onclose = (e) => {
+        console.log(`🔒 WebSocket closed (Code: ${e.code})`);
         setIsConnected(false);
-        // Only set error if we never connected successfully to avoid flashing errors on normal reload
       };
 
     } catch (err: any) {
-      console.error("Initialization failed:", err);
+      console.error("❌ Initialization failed:", err);
       setError(err.message || "初始化失败，请检查设备权限或网络。");
       setInitializing(false);
     }
   }, [scenario]);
 
   const startAudioCapture = (ctx: AudioContext, stream: MediaStream, ws: WebSocket) => {
+    console.log("🎤 Starting Audio Capture");
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     
     processor.onaudioprocess = async (e) => {
+      // If mic is muted by UI, do not send data, but keep processor running to avoid timing issues
+      // Note: We access the state directly via a ref or just let it flow silence if needed.
+      // Here we will just send it.
+      
       const inputData = e.inputBuffer.getChannelData(0);
       
       // FIX: createPcmBlob returns { data: "base64...", mimeType: "..." }
-      // It does NOT return a browser Blob. We use the data property directly.
       const pcmGenAiContent = createPcmBlob(inputData);
       
       if (ws.readyState === WebSocket.OPEN) {
@@ -148,7 +167,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
               payload: {
                   media: {
                       mimeType: 'audio/pcm;rate=16000',
-                      data: pcmGenAiContent.data // Use .data directly!
+                      data: pcmGenAiContent.data 
                   }
               }
           }));
@@ -160,6 +179,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   };
 
   const startVideoStreaming = (ws: WebSocket) => {
+    console.log("📹 Starting Video Streaming");
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
 
     frameIntervalRef.current = window.setInterval(() => {
@@ -202,28 +222,36 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   };
 
   const handleServerMessage = async (serverContent: any, ctx: AudioContext) => {
+    // Ensure context is running when we receive data
+    if (ctx.state === 'suspended') {
+        await ctx.resume();
+    }
+
     // 1. Audio Playback
     const audioData = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (audioData) {
-        if (ctx.state === 'suspended') await ctx.resume();
-
-        const audioBuffer = await decodeAudioData(
-            base64ToUint8Array(audioData),
-            ctx,
-            24000
-        );
-      
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
+        // console.log("🔊 Received Audio Chunk");
+        try {
+            const audioBuffer = await decodeAudioData(
+                base64ToUint8Array(audioData),
+                ctx,
+                24000
+            );
         
-        const currentTime = ctx.currentTime;
-        const startTime = Math.max(nextStartTimeRef.current, currentTime);
-        source.start(startTime);
-        nextStartTimeRef.current = startTime + audioBuffer.duration;
-        
-        sourcesRef.current.add(source);
-        source.onended = () => sourcesRef.current.delete(source);
+            const source = ctx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(ctx.destination);
+            
+            const currentTime = ctx.currentTime;
+            const startTime = Math.max(nextStartTimeRef.current, currentTime);
+            source.start(startTime);
+            nextStartTimeRef.current = startTime + audioBuffer.duration;
+            
+            sourcesRef.current.add(source);
+            source.onended = () => sourcesRef.current.delete(source);
+        } catch (e) {
+            console.error("Error decoding audio:", e);
+        }
     }
 
     // 2. Transcription
@@ -235,6 +263,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }
 
     if (serverContent?.turnComplete) {
+        // console.log("🔄 Turn Complete");
         if (currentInputTransRef.current.trim()) {
             setTranscripts(prev => [...prev, { role: 'user', text: currentInputTransRef.current, timestamp: Date.now() }]);
             currentInputTransRef.current = '';
@@ -246,6 +275,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
     }
 
     if (serverContent?.interrupted) {
+        console.log("⚠️ Interrupted");
         sourcesRef.current.forEach(s => s.stop());
         sourcesRef.current.clear();
         nextStartTimeRef.current = ctx.currentTime;
@@ -286,7 +316,7 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
   }, [transcripts]);
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
+    <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden" onClick={ensureAudioContext}>
         {/* Header */}
         <div className="flex justify-between items-center p-4 bg-gray-800 border-b border-gray-700">
             <div>
@@ -354,12 +384,13 @@ const LiveSession: React.FC<LiveSessionProps> = ({ scenario, onEndSession }) => 
                     className="w-full h-full object-cover transform -scale-x-100" 
                     playsInline 
                     autoPlay 
+                    muted 
                 />
                 <canvas ref={canvasRef} className="hidden" />
                 
                 <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-4">
                      <button 
-                        onClick={() => setMicActive(!micActive)}
+                        onClick={(e) => { e.stopPropagation(); setMicActive(!micActive); }}
                         className={`p-4 rounded-full ${micActive ? 'bg-gray-700 hover:bg-gray-600' : 'bg-red-600 hover:bg-red-700'} text-white transition-colors shadow-lg border border-white/10`}
                      >
                         {micActive ? (

@@ -140,38 +140,75 @@ const wss = new WebSocketServer({ server });
 
 // WebSocket Logic
 wss.on('connection', (ws) => {
+    console.log("🔌 New Client Connected via WebSocket");
     let session = null;
+
     ws.on('message', async (rawMsg) => {
-        const msg = JSON.parse(rawMsg);
-        if (msg.type === 'start_session') {
-            const { instruction } = msg;
-            try {
-                session = await ai.live.connect({
-                    model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-                    config: {
-                        responseModalities: [Modality.AUDIO],
-                        inputAudioTranscription: {},
-                        outputAudioTranscription: {},
-                        systemInstruction: instruction
-                    },
-                    callbacks: {
-                        onopen: () => ws.send(JSON.stringify({ type: 'status', status: 'open' })),
-                        onmessage: (serverContent) => ws.send(JSON.stringify({ type: 'gemini', data: serverContent })),
-                        onclose: () => ws.send(JSON.stringify({ type: 'status', status: 'closed' })),
-                        onerror: (e) => console.error(e)
-                    }
-                });
-            } catch (e) {
-                console.error("Gemini connection failed", e);
-                ws.send(JSON.stringify({ type: 'error', message: e.message }));
+        try {
+            // Ensure we convert Buffer to string before parsing
+            const msgStr = rawMsg.toString();
+            const msg = JSON.parse(msgStr);
+
+            if (msg.type === 'start_session') {
+                console.log("🚀 Starting Gemini Live Session...");
+                const { instruction } = msg;
+                try {
+                    session = await ai.live.connect({
+                        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+                        config: {
+                            responseModalities: [Modality.AUDIO],
+                            inputAudioTranscription: {},
+                            outputAudioTranscription: {},
+                            systemInstruction: instruction
+                        },
+                        callbacks: {
+                            onopen: () => {
+                                console.log("✅ Gemini Session Connected");
+                                ws.send(JSON.stringify({ type: 'status', status: 'open' }));
+                            },
+                            onmessage: (serverContent) => {
+                                // console.log("📥 Received data from Gemini"); // Too verbose for audio chunks, uncomment if needed
+                                ws.send(JSON.stringify({ type: 'gemini', data: serverContent }));
+                            },
+                            onclose: () => {
+                                console.log("🔒 Gemini Session Closed");
+                                ws.send(JSON.stringify({ type: 'status', status: 'closed' }));
+                            },
+                            onerror: (e) => {
+                                console.error("❌ Gemini Session Error:", e);
+                                ws.send(JSON.stringify({ type: 'error', message: "Gemini API Error: " + e.message }));
+                            }
+                        }
+                    });
+                } catch (e) {
+                    console.error("❌ Gemini Connection Failed:", e);
+                    ws.send(JSON.stringify({ type: 'error', message: e.message }));
+                }
+            } else if (msg.type === 'input') {
+                if (session) {
+                    // console.log("📤 Sending input to Gemini", msg.payload.media?.mimeType); // Too verbose
+                    session.sendRealtimeInput(msg.payload);
+                } else {
+                    console.warn("⚠️ Client sent input but no Gemini session is active.");
+                }
             }
-        } else if (msg.type === 'input') {
-            if (session) {
-                session.sendRealtimeInput(msg.payload);
-            }
+        } catch (err) {
+            console.error("❌ Error processing WebSocket message:", err);
         }
     });
-    ws.on('close', () => { /* Cleanup */ });
+
+    ws.on('error', (err) => {
+        console.error("❌ WebSocket Client Error:", err);
+    });
+
+    ws.on('close', () => {
+        console.log("🔌 Client Disconnected");
+        if (session) {
+            // session.close() is not always available/needed on some SDK versions, but good practice if exists or just let GC handle it
+            console.log("🧹 Cleaning up Gemini Session");
+            session = null;
+        }
+    });
 });
 
 // 2. Frontend Serving Logic (Vite Middleware or Static)

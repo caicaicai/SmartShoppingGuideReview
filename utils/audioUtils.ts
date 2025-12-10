@@ -11,13 +11,15 @@ export function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    // Chunking to avoid stack overflow on large buffers (though rare for audio chunks)
+    const chunkSize = 8192; 
+    for (let i = 0; i < len; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+    }
+    return btoa(binary);
 }
 
 // Returns a GenAI SDK compatible object, NOT a browser Blob
